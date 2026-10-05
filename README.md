@@ -2,6 +2,10 @@
 
 个人项目管理工具：**四个独立板块**（本地代码项目 / 资料文档目录 / 网址收藏 / GitHub 收藏）集中管理你的项目与资料，每条可备注、分组、打标签、收藏置顶。
 
+![项目板块](docs/screenshot-projects.png)
+
+![AI 助手](docs/screenshot-ai.png)
+
 ## 功能特性
 
 - **四板块独立管理**：每块有自己的收藏夹、自定义分组、最近打开/常用视图
@@ -29,12 +33,16 @@ npm run ui      # 仅前端（浏览器模式，数据为演示桩）
 
 ## 关于 ui-kit 依赖
 
-本仓库依赖作者另一套私有 UI 套件 `@rolling/ui-kit`（毛玻璃主题 + 窗口骨架 + 组件），**未随本仓库发布**：
+本仓库的毛玻璃 UI 来自作者的开源套件 **[@rolling/ui-kit](https://github.com/Rolling-39/ui-kit)**（主题变量 + 窗口骨架 + 组件 + 原生亚克力背景管理）：
 
 - `package.json` 中 `"@rolling/ui-kit": "file:../ui-kit"`
 - `src-tauri/Cargo.toml` 中 `tauri-ui-kit = { path = "../../ui-kit/rust" }`
 
-克隆本仓库后需自备该目录并保持相对位置（`ui-kit` 与本仓库同级），或自行调整上述依赖路径。
+克隆时把两个仓库放在同一级目录即可：
+
+```bash
+git clone https://github.com/Rolling-39/ui-kit ../ui-kit
+```
 
 ## License
 

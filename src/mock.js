@@ -34,6 +34,22 @@ const state = {
             tags: ['工具'],
         },
         {
+            id: 5, type: 'code', name: 'esp32-s3-cam', path: 'C:\\demo\\esp32-s3-cam',
+            url: null, description: 'ESP32-S3 摄像头开发板项目',
+            notes: '', readmePath: null, readmeRef: null, categoryId: 2, pinned: false,
+            archived: false, color: null, icon: 'cpu', openCount: 2,
+            lastOpenedAt: '2026-10-02T18:00:00Z', createdAt: '2026-08-20T10:00:00Z',
+            tags: ['嵌入式', 'ESP32'],
+        },
+        {
+            id: 6, type: 'code', name: 'device-controller', path: 'C:\\demo\\device-controller',
+            url: null, description: '设备控制器，硬件侧固件',
+            notes: '', readmePath: null, readmeRef: null, categoryId: 2, pinned: false,
+            archived: false, color: null, icon: null, openCount: 0,
+            lastOpenedAt: null, createdAt: '2026-09-10T10:00:00Z',
+            tags: ['嵌入式'],
+        },
+        {
             id: 3, type: 'link', name: 'Tauri 官方文档', path: null,
             url: 'https://tauri.app', description: 'Tauri 2 文档与指南',
             notes: '二期 GitHub 抓取会用到 raw 域名。', readmePath: null, readmeRef: null,
