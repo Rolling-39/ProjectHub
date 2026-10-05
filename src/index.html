@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<!--
+  ProjectHub / index.html —— 复制自 ui-kit/src/shell.template.html
+  导航项不写：createShell() 按面板清单生成。
+  不加内联 background：背景策略由 shell.css + theme.js 统一管。
+-->
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="transparent" />
+    <title>ProjectHub</title>
+</head>
+<body>
+    <!-- 兜底底色层：原生模糊不可用时的不透明底，必须保留 -->
+    <div class="backdrop-fallback" aria-hidden="true"></div>
+
+    <div class="app">
+        <header class="titlebar" data-tauri-drag-region>
+            <span class="titlebar-title" id="tbTitle">ProjectHub</span>
+            <div class="titlebar-controls">
+                <button class="tb-btn" id="tbMin" title="最小化">-</button>
+                <button class="tb-btn" id="tbMax" title="最大化">+</button>
+                <button class="tb-btn tb-close" id="tbClose" title="关闭">x</button>
+            </div>
+        </header>
+
+        <div class="app-body">
+            <aside class="sidebar">
+                <div class="sidebar-title">ProjectHub</div>
+                <nav class="sidebar-nav" id="sidebarNav"></nav>
+                <div class="sidebar-footer">© Rolling</div>
+            </aside>
+            <main class="content" id="content"></main>
+        </div>
+    </div>
+    <script type="module" src="/main.js"></script>
+</body>
+</html>

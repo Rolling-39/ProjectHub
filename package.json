@@ -1,0 +1,23 @@
+{
+  "name": "project-manager",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ProjectHub - 个人项目管理工具（Tauri 2 + @rolling/ui-kit）",
+  "type": "module",
+  "scripts": {
+    "ui": "vite",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "dependencies": {
+    "@rolling/ui-kit": "file:../ui-kit",
+    "dompurify": "^3.2.4",
+    "highlight.js": "^11.10.0",
+    "lucide": "^0.469.0",
+    "marked": "^15.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "vite": "^8.0.16"
+  }
+}
