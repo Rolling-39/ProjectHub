@@ -226,7 +226,7 @@ export function mount(root) {
         ]),
         el('div', { class: 'card' }, [
             el('div', { class: 'card-header', text: '关于' }),
-            el('p', { class: 'hint', text: 'ProjectHub v0.1.0 · UI：@rolling/ui-kit' }),
+            el('p', { class: 'hint', text: `ProjectHub v${__APP_VERSION__} · UI：@rolling/ui-kit` }),
             el('button', {
                 class: 'btn btn-text', text: '打开日志面板',
                 onClick: () => window.__shell?.showPanel('log'),

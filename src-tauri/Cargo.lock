@@ -2485,7 +2485,7 @@ dependencies = [
 
 [[package]]
 name = "project-manager"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "indexmap 1.9.3",
  "regex",
