@@ -1,4 +1,4 @@
-// GitHub 收藏板块 —— 导入式：粘贴仓库地址抓 README 本地化（M2）
+// GitHub 收藏板块 —— 导入式：粘贴仓库地址抓 README 本地化
 import { mountSection } from '../shared/section.js';
 
 export function mount(root) {

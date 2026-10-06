@@ -5,7 +5,7 @@
 //   { section, title, vias: ['explorer'|'terminal'|'editor'|'browser'][],
 //     readme: bool, docsFiles: bool }
 // ─────────────────────────────────────────────────────────────
-import { el, snack, snackErr, on, fmtSize } from '@rolling/ui-kit/ui';
+import { el, snack, snackErr, snackWarn, on, fmtSize, fmtIsoLocal, fmtRelativeDay } from '@rolling/ui-kit/ui';
 import {
     FolderOpen, Terminal, Code, ExternalLink, Star, Pencil, Trash2, Plus, FolderPlus, X, File,
     RefreshCw, FileUp, FolderSearch, ListChecks,
@@ -22,7 +22,7 @@ import { openScanImport } from './scanimport.js';
 const VIA_ICON = { explorer: FolderOpen, terminal: Terminal, editor: Code, browser: ExternalLink };
 const VIA_LABEL = { explorer: '资源管理器', terminal: '终端', editor: '编辑器', browser: '浏览器' };
 
-export function mountSection(root, cfg) {
+export async function mountSection(root, cfg) {
     const state = {
         items: [], categories: [], tags: [],
         view: 'all',            // all | fav | recent | common
@@ -32,6 +32,9 @@ export function mountSection(root, cfg) {
         selectedId: null,
         selectMode: false,      // 批量选择模式
         selected: new Set(),    // 勾选的条目 id
+        docDir: null,           // 文档目录浏览器当前所在目录
+        lastFilterSig: null,    // 上一次的过滤条件签名（用于同步勾选集）
+        detailItemId: null,     // 详情栏当前渲染的是哪一条（用于同条目的轻量刷新）
     };
 
     // ── 骨架 ──
@@ -86,9 +89,14 @@ export function mountSection(root, cfg) {
         detailPane,
     ]));
 
+    // 搜索防抖：不加的话每敲一个字符就重建整个卡片网格，条目多时输入卡顿
+    let searchTimer = null;
     searchInput.addEventListener('input', () => {
-        state.query = searchInput.value.trim().toLowerCase();
-        renderCards();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {
+            state.query = searchInput.value.trim().toLowerCase();
+            renderCards();
+        }, 150);
     });
 
     // ── 数据 ──
@@ -103,9 +111,42 @@ export function mountSection(root, cfg) {
             snackErr('加载失败：' + e);
         }
     }
-    const offBus = on('items-changed', ({ section } = {}) => {
-        if (!section || section === '*' || section === cfg.section) load();
+    // ── 事件总线 ──
+    // 单条变更（保存/打开/收藏/归档）带 item 回来，就只更新那一条：
+    // 重载整块要重取三个集合、重建全部 DOM，还会把详情栏的 README 重新读一遍磁盘。
+    // 带 removedIds 的是删除；其余（批量导入、分组改动）才真需要整块重载。
+    const offBus = on('items-changed', (p = {}) => {
+        const { section, item, removedIds } = p;
+        const mine = !section || section === '*' || section === cfg.section;
+        if (!mine) return;
+        if (item && item.type === cfg.section) { applyItemUpdate(item); return; }
+        if (Array.isArray(removedIds) && removedIds.length) { applyRemovals(removedIds); return; }
+        load();
     });
+
+    function applyItemUpdate(item) {
+        const idx = state.items.findIndex((x) => x.id === item.id);
+        if (idx < 0) { load(); return; }
+        if (item.archived) {
+            // 归档后不应再出现在列表里
+            state.items.splice(idx, 1);
+            if (state.selectedId === item.id) state.selectedId = null;
+        } else {
+            state.items[idx] = item;
+        }
+        renderCards();
+        renderDetail();
+    }
+
+    function applyRemovals(ids) {
+        const gone = new Set(ids);
+        state.items = state.items.filter((x) => !gone.has(x.id));
+        if (state.selectedId != null && gone.has(state.selectedId)) state.selectedId = null;
+        gone.forEach((id) => state.selected.delete(id));
+        renderBatchbar();
+        renderCards();
+        renderDetail();
+    }
 
     const groupOf = (item) => state.categories.find((c) => c.id === item.categoryId) || null;
 
@@ -165,11 +206,38 @@ export function mountSection(root, cfg) {
         renderCards();
     }
 
+    // 勾选只改这一张卡片的类名与勾选框，不重建整个网格：
+    // 重建会丢滚动位置与焦点，条目多时肉眼可见地卡。
     function toggleSelect(id) {
         if (state.selected.has(id)) state.selected.delete(id);
         else state.selected.add(id);
+        const on = state.selected.has(id);
+        const card = cardsGrid.querySelector(`.pm-card[data-item-id="${id}"]`);
+        if (card) {
+            card.classList.toggle('checked', on);
+            const cb = card.querySelector('.pm-card-cb');
+            if (cb) cb.checked = on;
+        }
         renderBatchbar();
-        renderCards();
+    }
+
+    /**
+     * 过滤条件变了就把不在当前视图里的勾选清掉。
+     * 否则"勾 3 条 → 切分组 → 点删除"会连带删掉用户已经看不见的条目。
+     * 返回勾选集是否真的发生了变化。
+     */
+    function syncSelection(list) {
+        const sig = [state.view, state.categoryId, state.tagId, state.query].join('|');
+        if (sig === state.lastFilterSig) return false;
+        state.lastFilterSig = sig;
+        if (!state.selected.size) return false;
+        const visible = new Set(list.map((i) => i.id));
+        let dropped = 0;
+        for (const id of [...state.selected]) {
+            if (!visible.has(id)) { state.selected.delete(id); dropped++; }
+        }
+        if (dropped) snackWarn(`视图已切换，已取消 ${dropped} 条当前不可见的勾选`);
+        return dropped > 0;
     }
 
     function renderBatchbar() {
@@ -189,9 +257,17 @@ export function mountSection(root, cfg) {
             renderBatchbar();
             renderCards();
         });
+        // 删的是"已勾选"而不是"当前可见已勾选"，所以把不可见的那部分也报出来
+        const visibleIds = new Set(visible.map((i) => i.id));
+        const hiddenCount = [...state.selected].filter((id) => !visibleIds.has(id)).length;
         batchbar.replaceChildren(
             el('label', { class: 'pm-batch-all' }, [allCb, '全选（当前视图）']),
-            el('span', { class: 'label', text: `已选 ${state.selected.size} 条` }),
+            el('span', {
+                class: 'label',
+                text: hiddenCount
+                    ? `已选 ${state.selected.size} 条（含 ${hiddenCount} 条当前不可见）`
+                    : `已选 ${state.selected.size} 条`,
+            }),
             el('span', { style: 'flex:1' }),
             el('button', {
                 class: 'btn btn-danger btn-sm',
@@ -304,7 +380,7 @@ export function mountSection(root, cfg) {
     function iconBlock(item, size = 18) {
         const custom = item.icon ? icon(item.icon, size) : null;
         if (custom) return custom;
-        if (item.icon) return el('span', { text: (item.name || '?')[0].toUpperCase() });
+        // 没设图标、或名字不在白名单里：回落成名称首字母色块
         return el('span', { text: (item.name || '?')[0].toUpperCase() });
     }
 
@@ -335,6 +411,8 @@ export function mountSection(root, cfg) {
                 + (state.selectedId === item.id && !selecting ? ' sel' : '')
                 + (selecting ? ' selecting' : '')
                 + (checked ? ' checked' : ''),
+            // 供勾选时就地定位这张卡片（避免勾一下重建整个网格）
+            dataset: { itemId: String(item.id) },
             role: 'button', tabindex: '0',
             onClick: () => {
                 if (selecting) { toggleSelect(item.id); return; }
@@ -370,6 +448,7 @@ export function mountSection(root, cfg) {
 
     function renderCards() {
         const list = visibleItems();
+        if (syncSelection(list)) renderBatchbar();
         countLabel.textContent = `${list.length} 条`;
         cardsGrid.replaceChildren(...(list.length
             ? list.map(cardEl)
@@ -381,22 +460,84 @@ export function mountSection(root, cfg) {
         return dir.replace(/[\\/]+$/, '') + '\\' + name;
     }
 
+    /** 键值行。返回行与值节点：值节点要留给"同条目状态刷新"就地改文本。 */
     function metaRow(k, v) {
-        return el('div', { class: 'kv' }, [el('span', { class: 'k', text: k }), el('span', { class: 'v', text: v })]);
+        const val = el('span', { class: 'v', text: v });
+        return { row: el('div', { class: 'kv' }, [el('span', { class: 'k', text: k }), val]), val };
     }
+
+    // 详情栏当前渲染的条目。事件回调必须读它而不是 build 时的闭包变量：
+    // 状态刷新之后闭包里的 item 已经是旧对象了（比如备注、收藏状态会回退）。
+    let detailItem = null;
+    const drefs = {};
 
     function renderDetail() {
         const item = state.items.find((i) => i.id === state.selectedId) || null;
-        detailPane.replaceChildren();
-        if (!item) { detailPane.hidden = true; return; }
+        if (!item) {
+            detailPane.hidden = true;
+            detailPane.replaceChildren();
+            state.detailItemId = null;
+            detailItem = null;
+            Object.keys(drefs).forEach((k) => { delete drefs[k]; });
+            return;
+        }
         detailPane.hidden = false;
+        // 同一条目、只是状态变了（打开次数/收藏/备注/编辑内容）：
+        // 只刷新会变的字段。重建整个详情栏会把 README 重新读一遍磁盘，
+        // 再跑一次 marked + DOMPurify + hljs，而这些内容并没有变。
+        if (state.detailItemId === item.id && drefs.name && updateDetail(item)) {
+            detailItem = item;
+            return;
+        }
+        detailItem = item;
+        state.detailItemId = item.id;
+        Object.keys(drefs).forEach((k) => { delete drefs[k]; });
+        buildDetail(item);
+    }
+
+    /** 就地刷新详情栏里会变的部分；结构相关的东西变了就返回 false 走完整重建 */
+    function updateDetail(item) {
+        if (!drefs.name || !drefs.opened || !drefs.count || !drefs.path) return false;
+        // README 卡片的"该不该出现"变了（例如编辑时补了路径）→ 需要重建
+        const shouldShowMd = !!((cfg.readme || cfg.itemReadme) && (item.path || item.readmePath));
+        if (!!drefs.mdCard !== shouldShowMd) return false;
+
+        const group = groupOf(item);
+        drefs.name.textContent = item.name;
+        if (drefs.iconHost) {
+            drefs.iconHost.style.cssText = item.color ? `background:${item.color}22;color:${item.color}` : '';
+            drefs.iconHost.replaceChildren(iconBlock(item, 20));
+        }
+        if (drefs.desc) {
+            drefs.desc.textContent = item.description || '';
+            drefs.desc.hidden = !item.description;
+        }
+        if (drefs.pin) {
+            drefs.pin.style.color = item.pinned ? 'var(--primary)' : '';
+            drefs.pin.title = item.pinned ? '取消收藏' : '收藏';
+        }
+        // 备注正在输入时不要覆盖用户正在敲的内容
+        if (drefs.notes && document.activeElement !== drefs.notes) drefs.notes.value = item.notes || '';
+        drefs.path.textContent = item.url || item.path || '—';
+        drefs.group.textContent = group ? group.name : '未分组';
+        drefs.tags.textContent = (item.tags || []).join('、') || '—';
+        drefs.opened.textContent = fmtIsoLocal(item.lastOpenedAt, { seconds: true, fallback: '从未' });
+        drefs.opened.title = fmtRelativeDay(item.lastOpenedAt, '从未');
+        drefs.count.textContent = String(item.openCount || 0);
+        return true;
+    }
+
+    function buildDetail(item) {
+        detailPane.replaceChildren();
         const group = groupOf(item);
 
         const notesArea = el('textarea', { class: 'textarea', style: 'min-height:70px', placeholder: '备注…' });
         notesArea.value = item.notes || '';
+        drefs.notes = notesArea;
         notesArea.addEventListener('change', async () => {
             try {
-                await store.saveItem({ ...item, notes: notesArea.value });
+                // 读 detailItem 而不是闭包里的 item：状态刷新后闭包里的对象是旧的
+                await store.saveItem({ ...detailItem, notes: notesArea.value });
                 snack('备注已保存');
             } catch (e) { snackErr(String(e)); }
         });
@@ -406,35 +547,54 @@ export function mountSection(root, cfg) {
             el('div', { class: 'card-header', text: cfg.docsFiles ? '文档目录' : 'README' }),
             mdBox,
         ]);
+        drefs.mdCard = readmeCard;
 
-        detailPane.append(
+        // 信息卡片的行先建好再塞进 append：值节点要留引用供就地刷新
+        const pathRow = metaRow(isLinkType(item.type) ? '网址' : '路径', item.url || item.path || '—');
+        const groupRow = metaRow('分组', group ? group.name : '未分组');
+        const tagsRow = metaRow('标签', (item.tags || []).join('、') || '—');
+        const openedRow = metaRow('最近打开', fmtIsoLocal(item.lastOpenedAt, { seconds: true, fallback: '从未' }));
+        const countRow = metaRow('打开次数', String(item.openCount || 0));
+        drefs.path = pathRow.val;
+        drefs.group = groupRow.val;
+        drefs.tags = tagsRow.val;
+        drefs.opened = openedRow.val;
+        drefs.count = countRow.val;
+        // 精确时间放 title，正文里给"今天/3 天前"这种好读的
+        drefs.opened.title = fmtRelativeDay(item.lastOpenedAt, '从未');
+
+        // Node.append() 会把 null 转成文本节点 "null" —— 不像 el()，它不过滤子节点。
+        // 最后一个参数是按条件给的 readmeCard，非 README 板块（网址等）恒为 null，
+        // 于是详情栏底部会多出一行 "null"。这里统一过滤一次再 append。
+        detailPane.append(...[
             el('div', { class: 'card' }, [
                 el('div', { class: 'pm-detail-head' }, [
-                    el('div', { class: 'pm-icon-block', style: item.color ? `background:${item.color}22;color:${item.color}` : '' },
-                        [iconBlock(item, 20)]),
+                    (drefs.iconHost = el('div',
+                        { class: 'pm-icon-block', style: item.color ? `background:${item.color}22;color:${item.color}` : '' },
+                        [iconBlock(item, 20)])),
                     el('div', { class: 'pm-detail-titles' }, [
-                        el('div', { class: 'pm-detail-name', text: item.name }),
+                        (drefs.name = el('div', { class: 'pm-detail-name', text: item.name })),
                         el('span', { class: 'badge', text: store.TYPE_LABEL[item.type] }),
                     ]),
                     el('div', { class: 'pm-detail-ops' }, [
-                        el('button', {
+                        (drefs.pin = el('button', {
                             class: 'pm-iconbtn', title: item.pinned ? '取消收藏' : '收藏',
                             style: item.pinned ? 'color:var(--primary)' : '',
-                            onClick: () => togglePin(item),
-                        }, [inlineIcon(Star, 15)]),
+                            onClick: () => togglePin(detailItem),
+                        }, [inlineIcon(Star, 15)])),
                         ...(cfg.github ? [
                             el('button', {
                                 class: 'pm-iconbtn', title: '重新抓取',
-                                onClick: () => doRefresh(item),
+                                onClick: () => doRefresh(detailItem),
                             }, [inlineIcon(RefreshCw, 15)]),
                             el('button', {
                                 class: 'pm-iconbtn', title: '替换 README…',
-                                onClick: () => doReplace(item),
+                                onClick: () => doReplace(detailItem),
                             }, [inlineIcon(FileUp, 15)]),
                         ] : []),
                         el('button', {
                             class: 'pm-iconbtn', title: '编辑',
-                            onClick: () => openItemForm({ type: cfg.section, item, categories: state.categories }),
+                            onClick: () => openItemForm({ type: cfg.section, item: detailItem, categories: state.categories }),
                         }, [inlineIcon(Pencil, 15)]),
                         el('button', {
                             class: 'pm-iconbtn', title: '关闭详情',
@@ -442,18 +602,19 @@ export function mountSection(root, cfg) {
                         }, [inlineIcon(X, 15)]),
                     ]),
                 ]),
-                item.description ? el('p', { class: 'hint', text: item.description }) : null,
+                // 恒存在，空内容靠 hidden 收起 —— 这样状态刷新能就地改它
+                (drefs.desc = el('p', { class: 'hint', text: item.description || '', hidden: !item.description })),
                 el('div', { class: 'btn-row', style: 'margin-top:10px' },
                     cfg.vias.map((v) => el('button', {
                         class: 'btn btn-outline btn-sm',
-                        onClick: () => doOpen(item, v),
+                        onClick: () => doOpen(detailItem, v),
                     }, [inlineIcon(VIA_ICON[v], 13), VIA_LABEL[v]]))),
                 el('div', { class: 'btn-row', style: 'margin-top:8px' }, [
                     ...(cfg.github ? [el('button', {
                         class: 'btn btn-text btn-sm', text: 'AI 摘要',
                         onClick: async () => {
                             try {
-                                const s = await store.aiSummarizeReadme(item.id);
+                                const s = await store.aiSummarizeReadme(detailItem.id);
                                 openModal('AI 摘要建议', (content, close) => {
                                     const desc = el('input', { class: 'input', value: s.description || '' });
                                     const tags = el('input', { class: 'input', value: (s.tags || []).join(', ') });
@@ -468,7 +629,7 @@ export function mountSection(root, cfg) {
                                                 onClick: async () => {
                                                     try {
                                                         await store.saveItem({
-                                                            ...item,
+                                                            ...detailItem,
                                                             description: desc.value.trim(),
                                                             tags: tags.value.split(/[,，]/).map((t) => t.trim()).filter(Boolean),
                                                         });
@@ -486,16 +647,16 @@ export function mountSection(root, cfg) {
                     el('button', {
                         class: 'btn btn-text btn-sm', text: '归档',
                         onClick: () => {
-                            store.setFlags(item.id, undefined, true)
+                            store.setFlags(detailItem.id, undefined, true)
                                 .then(() => { state.selectedId = null; snack('已归档'); })
                                 .catch((e) => snackErr(String(e)));
                         },
                     }),
                     el('button', {
                         class: 'btn btn-text btn-sm err-text', text: '删除',
-                        onClick: () => openConfirm(`删除「${item.name}」？该操作不可恢复。`, async () => {
+                        onClick: () => openConfirm(`删除「${detailItem.name}」？该操作不可恢复。`, async () => {
                             try {
-                                await store.removeItem(item.id);
+                                await store.removeItem(detailItem.id);
                                 state.selectedId = null;
                                 snack('已删除');
                             } catch (e) { snackErr(String(e)); }
@@ -505,18 +666,18 @@ export function mountSection(root, cfg) {
             ]),
             el('div', { class: 'card' }, [
                 el('div', { class: 'card-header', text: '信息' }),
-                metaRow(isLinkType(item.type) ? '网址' : '路径', item.url || item.path || '—'),
-                metaRow('分组', group ? group.name : '未分组'),
-                metaRow('标签', (item.tags || []).join('、') || '—'),
-                metaRow('最近打开', item.lastOpenedAt ? item.lastOpenedAt.slice(0, 19).replace('T', ' ') : '从未'),
-                metaRow('打开次数', String(item.openCount || 0)),
+                pathRow.row,
+                groupRow.row,
+                tagsRow.row,
+                openedRow.row,
+                countRow.row,
                 el('div', { class: 'field', style: 'margin-top:10px' }, [
                     el('span', { class: 'label label-strong', text: '备注（失焦自动保存）' }),
                     notesArea,
                 ]),
             ]),
             (cfg.readme || cfg.itemReadme) && (item.path || item.readmePath) ? readmeCard : null,
-        );
+        ].filter(Boolean));
 
         // README / 文档目录 / GitHub 本地 README（异步填充）
         const showDir = cfg.readme && item.path;
@@ -711,7 +872,18 @@ export function mountSection(root, cfg) {
         renderDetail();
     }
 
-    load();
+    // 这里必须 await。
+    //
+    // shell 会等 mount() 的 promise 落地，才把新面板揭示出来（在那之前上一个面板
+    // 一直留在屏幕上）。不 await 的话，揭示时数据还没到，用户看到的就是
+    // "只有 视图/分组/标签 三个表头，卡片和详情栏都是空的"那一下 —— 也就是
+    // 切换时的"闪一下"。只有 await 了，mount() 才等价于"首屏已渲染"。
+    await load();
 
-    return { destroy: () => offBus() };
+    return {
+        destroy() {
+            clearTimeout(searchTimer);
+            offBus();
+        },
+    };
 }

@@ -222,11 +222,11 @@ export function mount(root) {
         el('div', { class: 'card' }, [
             el('div', { class: 'card-header', text: '数据' }),
             el('div', { class: 'btn-row' }, [exportBtn, importBtn]),
-            el('p', { class: 'hint', text: '备份为 JSON（条目/分组/标签/设置）。GitHub 收藏的图片资产目录暂不随备份打包（M2）。' }),
+            el('p', { class: 'hint', text: '备份为 JSON（条目/分组/标签/设置）。GitHub 收藏的图片资产目录暂不随备份打包；AI 的 API Key 也不会写进备份（导出时脱敏，导入时保留本机已配的值）。' }),
         ]),
         el('div', { class: 'card' }, [
             el('div', { class: 'card-header', text: '关于' }),
-            el('p', { class: 'hint', text: 'ProjectHub v0.1.0（M1）· UI：@rolling/ui-kit' }),
+            el('p', { class: 'hint', text: 'ProjectHub v0.1.0 · UI：@rolling/ui-kit' }),
             el('button', {
                 class: 'btn btn-text', text: '打开日志面板',
                 onClick: () => window.__shell?.showPanel('log'),

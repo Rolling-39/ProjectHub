@@ -143,7 +143,9 @@ pub const ORG_SYSTEM_PROMPT: &str = r#"你是个人项目管理工具的整理�
 - 同一条目可以给多条建议，但不要给相互冲突的多条。"#
 ;
 
-pub const COMPLETE_PROMPT: &str = r#"你是 Windows 开发者的项目管理助手。根据条目信息给出：description(一句话中文简介，不超过30字)、tags(2到5个标签的数组，中英文小写均可)、groupId(从候选分组中选最合适的 id，没有合适的为 null)、reason(一句话中文理由)。只输出 JSON，格式：{"description":"...","tags":[],"groupId":null,"reason":"..."}"#;
+/// 注意：这条默认值必须与 ai_complete_item 实际要解析的字段一致（含 color），
+/// 否则用户在设置里恢复默认后，AI 拿到的指令与代码期望的返回结构会对不上。
+pub const COMPLETE_PROMPT: &str = r#"你是 Windows 开发者的项目管理助手。根据条目信息给出：description(一句话中文简介，不超过30字)、tags(2到5个标签的数组，中英文小写均可)、color(为条目挑的个性化 hex 颜色，6位不带#，柔和偏深、与条目用途或气质相关，没有合适的就是 null)、groupId(从候选分组中选最合适的 id，没有合适的为 null)、reason(一句话中文理由)。只输出 JSON，格式：{"description":"...","tags":[],"color":null,"groupId":null,"reason":"..."}"#;
 
 pub const SUMMARY_PROMPT: &str = r#"你是开发者的收藏整理助手。根据 GitHub 仓库的 README 内容给出：description(一句话中文简介，不超过40字，突出这个仓库是做什么的)、tags(2到5个标签的数组)、reason(一句话中文理由)。只输出 JSON：{"description":"...","tags":[],"reason":"..."}"#;
 

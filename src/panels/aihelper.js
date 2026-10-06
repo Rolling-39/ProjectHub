@@ -1,6 +1,6 @@
 // AI 助手面板 —— 自然语言指令 / 全库整理 / 待应用建议（持久化+撤回）/ 纯对话
 // AI 只产出建议；应用走 ai_apply_suggestions（带修改前快照，可逐条撤回）。
-import { el, snack, snackErr } from '@rolling/ui-kit/ui';
+import { el, snack, snackErr, fmtIsoLocal } from '@rolling/ui-kit/ui';
 import { Sparkles, Wand2 } from 'lucide';
 
 import * as store from '../shared/store.js';
@@ -58,12 +58,15 @@ export function mount(root) {
         [cmdBtn, orgBtn, logBtn, applySelBtn, ignoreSelBtn, chatSend, chatClear].forEach((x) => (x.disabled = b));
     }
 
+    // 四个板块各取一次并复用结果。
+    // 原实现把每个板块取了两遍（一遍只要 items、一遍只要 categories），
+    // 单次调用就是 24 次 IPC，而实际只需要 12 次（4 板块 × 3 个命令）。
     async function ensureSnapshot() {
-        const [allItems, allCats] = await Promise.all([
-            Promise.all(SECTIONS.map((s) => store.fetchSection(s))),
-            Promise.all(SECTIONS.map((s) => store.fetchSection(s).then((d) => d.categories))),
-        ]);
-        snapshot = { items: allItems.flatMap((d) => d.items), categories: allCats.flat() };
+        const secs = await Promise.all(SECTIONS.map((s) => store.fetchSection(s)));
+        snapshot = {
+            items: secs.flatMap((d) => d.items),
+            categories: secs.flatMap((d) => d.categories),
+        };
     }
 
     const itemOf = (id) => snapshot.items.find((i) => i.id === id);
@@ -130,7 +133,7 @@ export function mount(root) {
                 el('span', { class: 'badge', text: ACTION_LABEL[r.action] || r.action }),
                 el('span', { class: 'pm-ai-item', text: item ? item.name : `#${r.itemId}` }),
                 el('span', { class: 'pm-ai-target', text: targetOf(r) }),
-                el('span', { class: 'pm-ai-reason', text: (r.createdAt || '').slice(0, 16).replace('T', ' ') }),
+                el('span', { class: 'pm-ai-reason', text: fmtIsoLocal(r.createdAt, { fallback: '' }) }),
                 r.status === 'applied'
                     ? el('button', {
                         class: 'btn btn-text btn-sm', text: '撤回',
@@ -160,7 +163,8 @@ export function mount(root) {
     async function generate(fn, source) {
         busy(true);
         try {
-            await ensureSnapshot();
+            // 不在这里取快照：fn() 是后端自己组条目库的，用不到前端快照；
+            // 下面 refreshLists() 会取一次（原来这里多取了一次，一轮 24 次 IPC 白跑）
             const res = await fn();
             const list = Array.isArray(res) ? res : res?.suggestions || [];
             if (list.length) {

@@ -109,7 +109,7 @@ function renderHits() {
                 onClick: () => openHit(h),
                 onMouseenter: () => { active = idx; paintActive(); },
             }, [
-                el('span', { class: 'pm-hit-dot' }, [icon('circle-small', 10) || el('span')]),
+                el('span', { class: 'pm-hit-dot' }, [icon('circle', 10) || el('span')]),
                 el('span', { class: 'pm-hit-name', text: h.name }),
                 el('span', { class: 'pm-hit-desc', text: h.description || h.notes || h.path || h.url || '' }),
             ]));

@@ -24,29 +24,33 @@ export async function fetchSection(section) {
 
 export const saveItem = async (item) => {
     const saved = await call('upsert_item', { item });
-    emit('items-changed', { section: item.type });
+    // 带上更新后的条目：订阅方能就地更新那一条，不必重载整块
+    // （重载会重取三个集合、重建全部 DOM，还会重读详情栏的 README）
+    emit('items-changed', { section: saved.type, item: saved });
     return saved;
 };
 
 export const removeItem = async (id) => {
     await call('delete_item', { id });
-    emit('items-changed', { section: '*' });
+    emit('items-changed', { section: '*', removedIds: [id] });
 };
 
 export const deleteItems = async (ids) => {
     const n = await call('delete_items', { ids });
-    emit('items-changed', { section: '*' });
+    emit('items-changed', { section: '*', removedIds: [...ids] });
     return n;
 };
 
 export const setFlags = async (id, pinned, archived) => {
-    await call('set_item_flags', { id, pinned, archived });
-    emit('items-changed', { section: '*' });
+    const item = await call('set_item_flags', { id, pinned, archived });
+    emit('items-changed', { section: item.type, item });
+    return item;
 };
 
 export const openItem = async (id, via) => {
-    await call('open_item', { id, via, at: new Date().toISOString() });
-    emit('items-changed', { section: '*' });
+    const item = await call('open_item', { id, via, at: new Date().toISOString() });
+    emit('items-changed', { section: item.type, item });
+    return item;
 };
 
 export const saveCategory = async (section, id, name, parentId, sort) => {

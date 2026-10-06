@@ -31,6 +31,9 @@ const README_NAMES: [&str; 9] = [
 const BRANCHES: [&str; 3] = ["HEAD", "main", "master"];
 const MAX_IMAGES: usize = 30;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// 单次导入的图片总字节上限。单张 5 MB × 30 张能到 150 MB，
+/// 而这些图只是给条目当配图看，不值得占掉这些磁盘与流量。
+const MAX_TOTAL_BYTES: usize = 30 * 1024 * 1024;
 
 /// 解析 github.com/{owner}/{repo}（兼容带协议、www、.git、多余路径）
 pub fn parse_repo_url(url: &str) -> Result<(String, String), String> {
@@ -74,19 +77,21 @@ pub async fn fetch_repo(app: &AppHandle, url: &str) -> Result<FetchedRepo, Strin
     for branch in BRANCHES {
         for name in README_NAMES {
             let raw = format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{name}");
-            let hit = matches!(c.get(&raw).send().await, Ok(resp) if resp.status().is_success());
-            if !hit {
+            let resp = match c.get(&raw).send().await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if !resp.status().is_success() {
                 continue;
             }
-            emit(app, &format!("命中 {branch}/{name}，下载中…"));
-            let content = c
-                .get(&raw)
-                .send()
-                .await
-                .map_err(|e| format!("下载失败: {e}"))?
+            // 直接复用这一次响应的 body。
+            // 原实现是先 GET 一次只看状态码（把整份 README 下下来丢掉），
+            // 命中之后再 GET 一次取内容 —— 每个候选都要多传一整份 body。
+            let content = resp
                 .text()
                 .await
                 .map_err(|e| format!("解码失败: {e}"))?;
+            emit(app, &format!("命中 {branch}/{name}（{} KB）", content.len() / 1024));
             return Ok(FetchedRepo {
                 owner,
                 repo,
@@ -204,8 +209,30 @@ fn sniff_ext(bytes: &[u8], url: &str) -> String {
     "png".into()
 }
 
+/// 把一处图片引用改成本地文件名，只改"确实在引用图片"的位置。
+///
+/// 原实现是 `content.replace(orig, fname)` 全局替换：只要正文里出现过同样的
+/// 字符串（例如代码块里贴了同一段 URL、或 alt 文本恰好一样），就会被一起改掉。
+/// 这里只认 Markdown 图片语法 `](url` 与 <img src="url"> 三种锚点。
+fn rewrite_image_ref(md: &str, orig: &str, fname: &str) -> Option<String> {
+    let mut out = md.to_string();
+    let mut changed = false;
+    let needles = [
+        (format!("]({orig}"), format!("]({fname}")),
+        (format!("src=\"{orig}\""), format!("src=\"{fname}\"")),
+        (format!("src='{orig}'"), format!("src='{fname}'")),
+    ];
+    for (from, to) in &needles {
+        if out.contains(from.as_str()) {
+            out = out.replace(from.as_str(), to.as_str());
+            changed = true;
+        }
+    }
+    if changed { Some(out) } else { None }
+}
+
 /// 下载图片到 dir，返回（重写后的 markdown，成功数，失败数）。
-/// 替换锚定原始引用；失败者保留原链接（在线兜底）。
+/// 替换锚定图片语法；失败者保留原链接（在线兜底）。
 pub async fn localize_images(
     app: &AppHandle,
     c: &reqwest::Client,
@@ -223,7 +250,18 @@ pub async fn localize_images(
     emit(app, &format!("发现 {total} 张图片，下载到本地…"));
     let mut content = md.to_string();
     let (mut ok, mut fail) = (0usize, 0usize);
+    let mut total_bytes = 0usize;
+    let mut capped_logged = false;
     for (i, (orig, url)) in urls.iter().take(MAX_IMAGES).enumerate() {
+        if total_bytes >= MAX_TOTAL_BYTES {
+            fail += 1;
+            if !capped_logged {
+                capped_logged = true;
+                let mb = MAX_TOTAL_BYTES / (1024 * 1024);
+                emit(app, &format!("已达总量上限 {mb} MB，其余图片保留在线链接"));
+            }
+            continue;
+        }
         let mut saved = false;
         if let Ok(resp) = c.get(url).send().await {
             if resp.status().is_success() {
@@ -232,9 +270,17 @@ pub async fn localize_images(
                         let fname =
                             format!("img{i:02}_{}.{ext}", sanitize_stem(url, i), ext = sniff_ext(&bytes, url));
                         if std::fs::write(dir.join(&fname), &bytes).is_ok() {
-                            // 锚定原始引用替换（相对/绝对引用都能覆盖）
-                            content = content.replace(orig.as_str(), &fname);
-                            saved = true;
+                            // 锚定图片语法替换（相对/绝对引用都能覆盖）
+                            match rewrite_image_ref(&content, orig.as_str(), &fname) {
+                                Some(next) => {
+                                    content = next;
+                                    total_bytes += bytes.len();
+                                    saved = true;
+                                }
+                                // 文件写成功了但正文里找不到可锚定的引用位置：
+                                // 记失败，免得报"本地化成功"却看不见图
+                                None => saved = false,
+                            }
                         }
                     }
                 }

@@ -15,7 +15,7 @@ import { invoke, invokeOr, isTauri } from '@rolling/ui-kit/tauri';
 import { log } from '@rolling/ui-kit/ui';
 
 export const PRESET_COLORS = [
-    '#39C5BB', '#4A9EFF', '#9D6BFF', '#E86AA6',
+    '#39C5BB', '#66CCFF', '#9D6BFF', '#E86AA6',
     '#F2A33C', '#5CB85C', '#E24B4A', '#98A2AE',
 ];
 export const DEFAULT_ACCENT = '#39C5BB';

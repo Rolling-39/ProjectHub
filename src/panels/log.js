@@ -8,9 +8,16 @@ export function mount(root) {
     });
     box.textContent = logText();
 
+    // 日志常成串打出来（AI 补分组名一轮十几行）。每来一行就把上限 2000 行
+    // join 一次再整体重设 textContent，会明显卡；合并到下一帧统一刷一次。
+    let rafId = 0;
     const off = onLog((line, lines) => {
-        box.textContent = line ? lines.join('\n') : '';
-        box.scrollTop = box.scrollHeight;
+        if (rafId) return;
+        rafId = requestAnimationFrame(() => {
+            rafId = 0;
+            box.textContent = line ? lines.join('\n') : '';
+            box.scrollTop = box.scrollHeight;
+        });
     });
 
     root.appendChild(el('div', { class: 'card' }, [
@@ -31,5 +38,10 @@ export function mount(root) {
         ]),
     ]));
 
-    return { destroy: () => off() };
+    return {
+        destroy() {
+            cancelAnimationFrame(rafId);
+            off();
+        },
+    };
 }

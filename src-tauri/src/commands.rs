@@ -187,28 +187,68 @@ pub fn list_items(
         favorites_only: false,
     });
     let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // 一条 JOIN 取回条目与标签，替代原实现的 N+1（每条目一次 prepare + 一次查询，
+    // 150 条就是约 300 次 SQL，而每次数据变更都会重跑一遍）。
+    // 标签列用 LEFT JOIN，没标签的条目也会出现（tag_name 为 NULL）。
     let mut stmt = conn
         .prepare(
-            "SELECT * FROM items
-             WHERE type = ?1
-               AND (?2 = 0 OR archived = 0)
-               AND (?3 = 0 OR pinned = 1)
-             ORDER BY pinned DESC,
-                      (last_opened_at IS NULL), last_opened_at DESC,
-                      name COLLATE NOCASE",
+            "SELECT i.id, i.type, i.name, i.path, i.url, i.description, i.notes,
+                    i.readme_path, i.readme_ref, i.category_id, i.pinned, i.archived,
+                    i.color, i.icon, i.open_count, i.last_opened_at, i.created_at,
+                    t.name AS tag_name
+             FROM items i
+             LEFT JOIN item_tags it ON it.item_id = i.id
+             LEFT JOIN tags t ON t.id = it.tag_id
+             WHERE i.type = ?1
+               AND (?2 = 0 OR i.archived = 0)
+               AND (?3 = 0 OR i.pinned = 1)
+             ORDER BY i.pinned DESC,
+                      (i.last_opened_at IS NULL), i.last_opened_at DESC,
+                      i.name COLLATE NOCASE,
+                      t.name COLLATE NOCASE",
         )
         .map_err(|e| e.to_string())?;
-    let items = stmt
+    let rows = stmt
         .query_map(
             params![section, f.exclude_archived as i64, f.favorites_only as i64],
-            row_to_item,
+            |r| {
+                let item = Item {
+                    id: r.get(0)?,
+                    r#type: r.get(1)?,
+                    name: r.get(2)?,
+                    path: r.get(3)?,
+                    url: r.get(4)?,
+                    description: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    notes: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    readme_path: r.get(7)?,
+                    readme_ref: r.get(8)?,
+                    category_id: r.get(9)?,
+                    pinned: r.get::<_, i64>(10)? != 0,
+                    archived: r.get::<_, i64>(11)? != 0,
+                    color: r.get(12)?,
+                    icon: r.get(13)?,
+                    open_count: r.get(14)?,
+                    last_opened_at: r.get(15)?,
+                    created_at: r.get::<_, Option<String>>(16)?.unwrap_or_default(),
+                    tags: Vec::new(),
+                };
+                Ok((item, r.get::<_, Option<String>>(17)?))
+            },
         )
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    let mut items = items;
-    for it in &mut items {
-        fill_tags(&conn, it)?;
+
+    // 同一条目的多行是连续的（ORDER BY 以条目列为前缀），顺序合并即可
+    let mut items: Vec<Item> = Vec::new();
+    for row in rows {
+        let (mut item, tag) = row.map_err(|e| e.to_string())?;
+        if let Some(t) = tag {
+            if items.last().map(|last| last.id) == Some(item.id) {
+                items.last_mut().expect("刚判断过非空").tags.push(t);
+                continue;
+            }
+            item.tags.push(t);
+        }
+        items.push(item);
     }
     Ok(items)
 }
@@ -358,13 +398,14 @@ pub fn delete_items(db: State<Db>, ids: Vec<i64>) -> Result<usize, String> {
     Ok(n)
 }
 
+/// 改收藏/归档标志，返回更新后的条目（供前端就地更新）
 #[tauri::command]
 pub fn set_item_flags(
     db: State<Db>,
     id: i64,
     pinned: Option<bool>,
     archived: Option<bool>,
-) -> Result<(), String> {
+) -> Result<Item, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     if let Some(p) = pinned {
         conn.execute("UPDATE items SET pinned = ?1 WHERE id = ?2", params![p as i64, id])
@@ -374,7 +415,7 @@ pub fn set_item_flags(
         conn.execute("UPDATE items SET archived = ?1 WHERE id = ?2", params![a as i64, id])
             .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    read_item_by_id(&conn, id)
 }
 
 // ── 分组（按板块独立） ──
@@ -503,8 +544,11 @@ fn open_browser(url: &str) -> Result<(), String> {
 }
 
 /// 打开条目并记录历史。at 由前端传 ISO 时间，避免引入 chrono。
+///
+/// 返回更新后的条目：前端据此就地更新那一条，不必为"打开次数 +1"重载整块
+/// （重载要重取三个集合、重建全部 DOM，还会把详情栏的 README 重读一遍磁盘）。
 #[tauri::command]
-pub fn open_item(db: State<Db>, id: i64, via: String, at: Option<String>) -> Result<(), String> {
+pub fn open_item(db: State<Db>, id: i64, via: String, at: Option<String>) -> Result<Item, String> {
     let (path, url): (Option<String>, Option<String>) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         conn.query_row("SELECT path, url FROM items WHERE id = ?1", params![id], |r| {
@@ -541,7 +585,18 @@ pub fn open_item(db: State<Db>, id: i64, via: String, at: Option<String>) -> Res
         _ => return Err("无效的打开方式".into()),
     }
 
-    let now = at.unwrap_or_else(|| "1970-01-01T00:00:00Z".into());
+    // 前端没给时间就由数据库取当前 UTC。
+    // 不要回落到 1970-01-01：那会静默把 last_opened_at 写坏，
+    // 条目在"最近打开"里永远排最后，而且从界面上完全看不出哪里错了。
+    let now: String = match at {
+        Some(t) if !t.trim().is_empty() => t,
+        _ => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            conn.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |r| r.get(0))
+                .map_err(|e| format!("取当前时间失败: {e}"))?
+        }
+    };
+
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE items SET open_count = open_count + 1, last_opened_at = ?1 WHERE id = ?2",
@@ -553,7 +608,7 @@ pub fn open_item(db: State<Db>, id: i64, via: String, at: Option<String>) -> Res
         params![id, now, via],
     )
     .map_err(|e| e.to_string())?;
-    Ok(())
+    read_item_by_id(&conn, id)
 }
 
 // ── Markdown ──
@@ -682,16 +737,26 @@ pub fn search_all(db: State<Db>, query: String) -> Result<Vec<SearchHit>, String
     if q.is_empty() {
         return Ok(vec![]);
     }
-    let like = format!("%{q}%");
+    // LIKE 的通配符必须转义：搜 "50%" 或 "a_b" 时 % 与 _ 会被当作通配符，
+    // 结果变成"匹配一切"，看起来像搜索失灵。
+    let escaped = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+    let like = format!("%{escaped}%");
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare(
+            // path / url 也要参与匹配：命令面板会把它们展示出来，
+            // 能看见却搜不到会让人以为搜索坏了。
             "SELECT DISTINCT i.id, i.type, i.name, i.description, i.notes, i.path, i.url
              FROM items i
              LEFT JOIN item_tags it ON it.item_id = i.id
              LEFT JOIN tags t ON t.id = it.tag_id
              WHERE i.archived = 0
-               AND (i.name LIKE ?1 OR i.description LIKE ?1 OR i.notes LIKE ?1 OR t.name LIKE ?1)
+               AND (i.name LIKE ?1 ESCAPE '\\'
+                    OR i.description LIKE ?1 ESCAPE '\\'
+                    OR i.notes LIKE ?1 ESCAPE '\\'
+                    OR i.path LIKE ?1 ESCAPE '\\'
+                    OR i.url LIKE ?1 ESCAPE '\\'
+                    OR t.name LIKE ?1 ESCAPE '\\')
              ORDER BY i.pinned DESC, i.name COLLATE NOCASE
              LIMIT 50",
         )
@@ -1003,12 +1068,16 @@ pub async fn ai_complete_item(db: State<'_, Db>, id: i64) -> Result<Value, Strin
         (item_json, json!(groups))
     };
 
+    // 用读出来的（用户可在设置里改写的）提示词。
+    // 原实现把它读出来却没用，改成硬编码了一条 system 消息 —— 结果是设置页里
+    // "① 条目补全提示词"改了完全不生效。编译器那条 unused variable 警告
+    // 就是这件事留在地上的痕迹。
     let sys_prompt = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         prompt_for(&conn, "ai_prompt_complete", crate::ai::COMPLETE_PROMPT)
     };
     let messages = json!([
-        { "role": "system", "content": "你是 Windows 开发者的项目管理助手。根据条目信息给出：description(一句话中文简介，不超过30字)、tags(2到5个标签的数组，中英文小写均可)、color(为条目挑的个性化 hex 颜色，6位不带#，柔和偏深、与条目用途或气质相关，没有合适的就是 null)、groupId(从候选分组中选最合适的 id，没有合适的为 null)、reason(一句话中文理由)。只输出 JSON，格式：{\"description\":\"...\",\"tags\":[],\"color\":null,\"groupId\":null,\"reason\":\"...\"}" },
+        { "role": "system", "content": sys_prompt },
         { "role": "user", "content": format!("条目：{item_json}\n候选分组：{groups_json}") },
     ]);
     let reply = crate::ai::chat(&cfg, &messages, true).await?;
@@ -1690,6 +1759,21 @@ pub fn ai_get_prompts(db: State<Db>) -> Result<Value, String> {
 
 // ── 备份导入/导出 ──
 
+/// 备份里敏感设置的占位符。见 export_data / import_data。
+const REDACTED: &str = "__REDACTED__";
+
+/// 哪些设置属于"不该跟着备份文件走"的凭据。
+/// 宁可多判几个：漏判的后果是密钥被拷到别处，误判的后果只是重填一次。
+fn is_secret_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    k.contains("api_key")
+        || k.contains("apikey")
+        || k.ends_with("_key")
+        || k.contains("token")
+        || k.contains("secret")
+        || k.contains("password")
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Backup {
@@ -1734,10 +1818,24 @@ pub fn export_data(db: State<Db>, path: String, at: Option<String>) -> Result<us
         let v: Vec<(i64, i64)> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
         v
     };
+    // 备份文件可能被拷到别处、贴给人看、丢进网盘，而 settings 里存着 AI 的
+    // API Key。所以导出时把密钥类设置换成占位符 —— 设置页写的是"仅存本地"，
+    // 导出成明文就与这句话矛盾了。导入时遇到占位符会跳过，保留本机原值。
     let settings: Vec<(String, String)> = {
         let mut stmt = conn.prepare("SELECT key, value FROM settings").map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
-        let v: Vec<(String, String)> = rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| {
+            let k: String = r.get(0)?;
+            let v: String = r.get(1)?;
+            Ok((k, v))
+        }).map_err(|e| e.to_string())?;
+        let v: Vec<(String, String)> = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|(k, val)| {
+                if is_secret_key(&k) { (k, REDACTED.to_string()) } else { (k, val) }
+            })
+            .collect();
         v
     };
 
@@ -1768,7 +1866,12 @@ pub fn import_data(db: State<Db>, path: String) -> Result<usize, String> {
     tx.execute("DELETE FROM items", []).ok();
     tx.execute("DELETE FROM categories", []).ok();
     tx.execute("DELETE FROM tags", []).ok();
-    tx.execute("DELETE FROM settings", []).ok();
+    // AI 建议与对话也要清：建议行带着导出时那套 item_id，导入后 id 会重新落到
+    // 别的条目上，用户点"应用"就会改错东西。对话记录同理（它的上下文是旧库）。
+    tx.execute("DELETE FROM ai_suggestions", []).ok();
+    tx.execute("DELETE FROM ai_chat", []).ok();
+    // 注意这里**不删 settings**：备份里的密钥是占位符，删掉就等于把本机
+    // 已配好的 API Key 抹了。改成下面按条 upsert，本机独有/敏感的项得以保留。
 
     for it in &backup.items {
         tx.execute(
@@ -1807,8 +1910,16 @@ pub fn import_data(db: State<Db>, path: String) -> Result<usize, String> {
         .map_err(|e| e.to_string())?;
     }
     for (k, v) in &backup.settings {
-        tx.execute("INSERT INTO settings(key, value) VALUES(?1,?2)", params![k, v])
-            .map_err(|e| e.to_string())?;
+        // 占位符说明这是导出时被脱敏的凭据，跳过，保留本机当前值
+        if v == REDACTED {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO settings(key, value) VALUES(?1,?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![k, v],
+        )
+        .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(backup.items.len())

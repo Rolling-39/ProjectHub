@@ -19,7 +19,7 @@ const state = {
         {
             id: 1, type: 'code', name: 'project-manager', path: 'C:\\demo\\project-manager',
             url: null, description: '本项目（浏览器演示数据）',
-            notes: 'M1 备注演示：浏览器模式下可以自由增删改，数据只存在内存里。',
+            notes: '备注演示：浏览器模式下可以自由增删改，数据只存在内存里。',
             readmePath: null, readmeRef: null, categoryId: 1, pinned: true, archived: false,
             color: null, icon: 'folder-git-2', openCount: 3,
             lastOpenedAt: '2026-10-04T09:00:00Z', createdAt: '2026-10-03T10:00:00Z',
@@ -162,7 +162,7 @@ const CANNED = {
             '| 功能 | 状态 |', '|---|---|',
             '| GFM 表格 | ✓ |', '| 代码高亮 | 见下 |', '', '```rust',
             'fn main() {', '    println!("Hello ProjectHub");', '}', '```', '',
-            '- [x] 骨架', '- [x] 主题色', '- [ ] M2 GitHub 收藏', '',
+            '- [x] 骨架', '- [x] 主题色', '- [x] 图标选择器', '',
         ].join('\n'),
         baseDir: 'C:\\demo',
     }),

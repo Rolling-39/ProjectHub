@@ -33,7 +33,7 @@ const shell = await createShell({
         log:      { title: '日志', icon: navIcon(ScrollText), hidden: true, load: () => import('./panels/log.js') },
     },
     onReady(s) {
-        // 侧栏底部：设置 / 日志 入口（M1 会加图标并顺带整理）
+        // 侧栏底部：设置 / 日志 入口。面板清单里它们是 hidden，所以需要这两个按钮直达
         window.__shell = s;
         const footer = document.querySelector('.sidebar-footer');
         if (footer) {
