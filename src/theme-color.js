@@ -8,9 +8,9 @@
 // 按 亮/暗 映射到 kit 的 --primary-rgb / --on-primary / --backdrop-tint /
 // --backdrop-fallback → 原生侧 refreshBackdrop() 重新读 tint。
 //
-// 亮暗三选一（跟随系统/亮/暗）：kit 只有跟随系统，这里用 html[data-theme]
-// 覆盖块实现，不动 kit。
-import { refreshBackdrop } from '@rolling/ui-kit/theme';
+// 亮暗三选一（跟随系统/亮/暗）：设 data-theme 与同步原生背景现在收口在套件的
+// setTheme() 里（以前在这里手写两步），本文件只维护档位状态、主变量与持久化。
+import { refreshBackdrop, isBackdropActive, setTheme } from '@rolling/ui-kit/theme';
 import { invoke, invokeOr, isTauri } from '@rolling/ui-kit/tauri';
 import { log } from '@rolling/ui-kit/ui';
 
@@ -130,6 +130,14 @@ export function applyAccent(hex) {
     const html = document.documentElement;
     html.classList.add('theme-switching');
     requestAnimationFrame(() => requestAnimationFrame(() => html.classList.remove('theme-switching')));
+    // 上面重写了 --backdrop-tint，但原生窗口背景的着色是 applyBackdrop 时读走的值。
+    // 不重设的话，换主题色后玻璃面板是新的、窗口背后的原生着色还是旧的
+    //（Win11 忽略 tint 看不出，Win10 上会明显不同步）。
+    // 用 isBackdropActive() 把启动路径排除掉：那时 initBackdrop 还没跑，
+    // 它随后会自己读到最新的 tint，不需要在这里多推一次。
+    if (isBackdropActive()) {
+        refreshBackdrop().catch((e) => log('换主题色后重设原生背景失败：' + e));
+    }
     return true;
 }
 
@@ -148,16 +156,16 @@ export async function persistSetting(key, value) {
 
 /**
  * 设置亮暗模式：'system' | 'light' | 'dark'
- * 锁定模式下 kit 的系统配色监听不会触发，需手动重设原生背景。
+ *
+ * 「设 data-theme」与「同步原生背景明暗」这两步收口在套件的 setTheme() 里 ——
+ * 手写这两步很容易漏掉第二步，而漏掉的后果（CSS 已换配色、窗口背后的原生背景
+ * 没换）正是套件文档反复警告的那件事。本函数只保留应用自己的部分：
+ * 档位状态、主变量重写与持久化。
  */
 export async function setThemeMode(mode, persist = true) {
     if (!['system', 'light', 'dark'].includes(mode)) return;
     currentMode = mode;
-    if (mode === 'system') document.documentElement.removeAttribute('data-theme');
-    else document.documentElement.setAttribute('data-theme', mode);
-    if (isTauri) {
-        try { await refreshBackdrop(); } catch (e) { log('重设原生背景失败：' + e); }
-    }
+    await setTheme(mode);
     // 亮暗切换影响主变量取值，重写一遍（theme-switching 已在 applyAccent 里瞬时禁过渡）
     writeAccentVars(currentAccent);
     if (persist) await persistSetting('theme_mode', mode);
